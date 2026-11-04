@@ -1,0 +1,8 @@
+# Object files and host-only test binary
+*.o
+*.obj
+dist/df-selftest
+
+# The Windows binaries in dist/ are committed on purpose so they can be
+# downloaded straight from the repository page. CI also builds them as
+# workflow artifacts and release assets.

@@ -1,0 +1,78 @@
+/*
+ * selftest.c - host tests for the pure helpers in df_format.h.
+ * Run with `make test`. No Windows required.
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <wchar.h>
+
+#include "df_format.h"
+
+static int failures = 0;
+
+static void check_size(unsigned long long bytes, int si, int blocks,
+                       const wchar_t *want)
+{
+    DfOptions o;
+    wchar_t got[64];
+    memset(&o, 0, sizeof(o));
+    o.si = si;
+    o.blocks = blocks;
+    df_format_size(bytes, &o, got, 64);
+    if (wcscmp(got, want) != 0) {
+        wprintf(L"FAIL size(%llu, si=%d, k=%d): got [%ls] want [%ls]\n",
+                bytes, si, blocks, got, want);
+        failures++;
+    }
+}
+
+static void check_class(const wchar_t *label, const wchar_t *provider,
+                        int drive_type, int want)
+{
+    int got = df_classify(label, provider, drive_type);
+    if (got != want) {
+        wprintf(L"FAIL classify(label=%ls, provider=%ls, type=%d): got %d want %d\n",
+                label ? label : L"", provider ? provider : L"", drive_type, got, want);
+        failures++;
+    }
+}
+
+int main(void)
+{
+    /* 1024-based, the default */
+    check_size(0ULL,          0, 0, L"0B");
+    check_size(1023ULL,       0, 0, L"1023B");
+    check_size(1024ULL,       0, 0, L"1.0K");
+    check_size(1536ULL,       0, 0, L"1.5K");
+    check_size(1048576ULL,    0, 0, L"1.0M");
+    check_size(4294967296ULL, 0, 0, L"4.0G");
+    check_size(317322100736ULL, 0, 0, L"295.5G");
+
+    /* SI, powers of 1000 */
+    check_size(1000ULL,       1, 0, L"1.0k");
+    check_size(1000000ULL,    1, 0, L"1.0M");
+    check_size(317322100736ULL, 1, 0, L"317.3G");
+
+    /* 1K blocks */
+    check_size(1024ULL,       0, 1, L"1");
+    check_size(2048ULL,       0, 1, L"2");
+    check_size(1025ULL,       0, 1, L"2");
+    check_size(0ULL,          0, 1, L"0");
+
+    /* classification */
+    check_class(L"Windows 10", L"", 3, 0);        /* local NTFS */
+    check_class(L"",           L"", 3, 0);        /* local, no label */
+    check_class(L"Mega",       L"Mega", 4, 2);    /* cloud by label */
+    check_class(L"rclone-ssh", L"rclone", 4, 2);  /* cloud by provider */
+    check_class(L"OneDrive",   L"", 3, 2);        /* cloud, fixed type */
+    check_class(L"Data",       L"\\\\server\\share", 4, 1); /* plain net */
+    check_class(L"BOX",        L"", 3, 2);        /* case-insensitive */
+
+    if (failures == 0) {
+        wprintf(L"all tests passed\n");
+        return 0;
+    }
+    wprintf(L"%d test(s) failed\n", failures);
+    return 1;
+}
