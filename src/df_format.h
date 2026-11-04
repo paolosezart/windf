@@ -23,8 +23,11 @@ typedef struct {
 
 #ifdef _WIN32
 #define DF_SNWPRINTF _snwprintf
+/* MSVCRT printf does not understand C99 %llu before Windows 10. */
+#define DF_U64_FMT L"%I64u"
 #else
 #define DF_SNWPRINTF swprintf
+#define DF_U64_FMT L"%llu"
 #endif
 
 /* Human-readable size. blocks -> 1K units; si -> powers of 1000. */
@@ -40,7 +43,7 @@ static void df_format_size(unsigned long long bytes, const DfOptions *o,
 
     if (o->blocks) {
         unsigned long long blocks = (bytes + 1023) / 1024;
-        DF_SNWPRINTF(out, outlen, L"%llu", blocks);
+        DF_SNWPRINTF(out, outlen, DF_U64_FMT, blocks);
         return;
     }
 
