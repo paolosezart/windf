@@ -66,6 +66,10 @@ jobs:
             Output is grouped by physical disk, with real free-space numbers.
             The usual coreutils ports report `Avail 0` on NTFS; this one does not.
 
+            Columns: `Volume` (drive letter), `Type` (NTFS/FAT32/exFAT...),
+            `Size`, `Used`, `Avail`, `Use%`, `Mounted on`. Each physical disk
+            also prints its model and serial number when the drive reports one.
+
             | File | Architecture | Notes |
             | --- | --- | --- |
             | `df-x64.exe` | 64-bit (x86-64) | rename to `df.exe` and put on your `PATH` |
@@ -77,7 +81,7 @@ jobs:
             `KERNEL32`, `MPR` and `msvcrt`, which ship with Windows.
 
             ```
-            df -T          group by physical disk, show filesystem type
+            df             group by physical disk, show filesystem type
             df -h          sizes in powers of 1024 (default)
             df -H          sizes in powers of 1000
             df -k          sizes in 1024-byte blocks

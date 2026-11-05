@@ -12,25 +12,28 @@ This exists because the common `df` ports for Windows report `Avail 0` and
 numbers through the Win32 API.
 
 ```
-df for Windows  -  2026-11-05 01:50
+df for Windows  -  2026-01-15 09:41
 
-Physical disk 0: Lexar 240GB SSD  (223.6G, SSD, SATA)
-  Filesystem   Type        Size      Used     Avail  Use%  Mounted on
-  C:           NTFS      295.5G    153.7G    141.8G    52  Windows 10
+Physical disk 0: Example SSD 512GB
+  Serial: EXAMP0123456789
+  Volume   Type          Size      Used     Avail  Use%  Mounted on
+  C:       NTFS        475.0G    241.3G    233.7G    51  Windows
+  D:       NTFS        200.0G     88.4G    111.6G    44  Data
 
-Physical disk 1: WALRAM 128G  (119.2G, SSD, SATA)
-  Filesystem   Type        Size      Used     Avail  Use%  Mounted on
-  G:           NTFS      223.6G    151.8G     71.8G    68  SSD OLD w10
+Physical disk 1: Sample NVMe 1TB
+  Serial: SMPL1234567890AB
+  Volume   Type          Size      Used     Avail  Use%  Mounted on
+  E:       NTFS        931.5G    402.1G    529.4G    43  Projects
 
-Physical disk 2: CT1000BX500SSD1  (931.5G, SSD, SATA)
-  Filesystem   Type        Size      Used     Avail  Use%  Mounted on
-  D:           NTFS      636.1G    519.5G    116.6G    82  SSD 1TB
-  E:           NTFS      119.1G     51.5G     67.6G    43  SSD w7
+Other local volumes:
+  Volume   Type          Size      Used     Avail  Use%  Mounted on
+  M:       FAT32      1024.0M    232.1M    791.9M    23  RAM
 
 Network and cloud mounts:
-  Filesystem   Type        Size      Used     Avail  Use%  Mounted on
-  M:           -          50.0G     40.0G     10.0G    80  Mega [CLOUD]
-  R:           -             0B        0B        0B     -  rclone-ssh [CLOUD]
+  Volume   Type          Size      Used     Avail  Use%  Mounted on
+  O:       -            54.8G     32.9G     21.9G    60  - [NET]
+  T:       -             1.0T    314.0G    710.0G    31  - [NET]
+  W:       -            50.0G     36.3G     13.7G    73  MEGA [CLOUD]
 ```
 
 ## Two forms, same output
@@ -55,13 +58,31 @@ Use the binary if you can. Use `df.bat` if you want a single file with no
 -h, --human-readable   print sizes in powers of 1024 (default)
 -H, --si               print sizes in powers of 1000
 -k                     print sizes in 1024-byte blocks
--T, --print-type       print the filesystem type column
+-T, --print-type       accepted for df compatibility (Type is always shown)
 -a, --all              include volumes without a drive letter
     --no-color         do not colorize output
     --help             display this help and exit
 ```
 
 Short flags combine: `-hT` is the same as `-h -T`.
+
+The `Type` column is always printed, so `-T` is a no-op kept for
+compatibility with the Unix `df -T`. `-a` adds volumes that have no drive
+letter (recovery partitions, RAM disks); without it they are hidden, because
+they usually report `0B` and add noise.
+
+## Columns
+
+| Column | Meaning |
+| --- | --- |
+| Volume | the drive letter, or `-` for a letterless volume |
+| Type | the filesystem: `NTFS`, `FAT32`, `exFAT`, ... (`-` when unknown, e.g. a network or cloud mount) |
+| Size / Used / Avail | capacity in human units (or 1K blocks with `-k`) |
+| Use% | percentage of the volume in use |
+| Mounted on | the volume label, or the network/cloud provider, plus a `[NET]` / `[CLOUD]` tag |
+
+Each physical disk also prints its model and, when the drive reports it, its
+serial number on the line below.
 
 ## Colors
 
@@ -145,30 +166,55 @@ The binary (`src/df.c`) uses only stable Win32 APIs:
   drive letters and labels.
 - `GetDiskFreeSpaceEx` — real free/total bytes per volume.
 - `CreateFile("\\.\PhysicalDriveN")` plus `IOCTL_DISK_GET_LENGTH_INFO` and
-  `IOCTL_STORAGE_QUERY_PROPERTY` — physical disk list, size, bus and media
-  type.
+  `IOCTL_STORAGE_QUERY_PROPERTY` — physical disk list, size, bus, media type
+  and serial number.
 - `CreateFile("\\.\X:")` plus `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` — map a
   volume to its physical disk number.
 - `FindFirstVolumeW`, `GetVolumePathNamesForVolumeNameW` — volumes without a
-  drive letter (recovery partitions).
+  drive letter (recovery partitions); shown only with `-a`.
 
 The batch file reaches the same result through WMI: `Win32_DiskDrive`,
-`Win32_DiskDriveToDiskPartition`, `Win32_LogicalDiskToPartition` and
-`Win32_LogicalDisk`.
+`Win32_DiskDriveToDiskPartition`, `Win32_LogicalDiskToPartition`,
+`Win32_LogicalDisk` and (with `-a`) `Win32_Volume`.
 
 Volumes are classified as `LOCAL`, `NET` or `CLOUD`. `NET` means a mapped
 network drive. `CLOUD` means the label or provider matches a known cloud
 client (Mega, rclone, OneDrive, Dropbox, Google Drive, Yandex, WebDAV,
 Nextcloud, iCloud, pCloud, Box).
 
+## Windows compatibility
+
+| Version | Status |
+| --- | --- |
+| Windows 11 / 10 | tested |
+| Windows 8 / 8.1 | expected to work (same APIs) |
+| Windows 7 | expected to work (same APIs) |
+| Windows Vista | expected to work (same APIs) |
+
+The binary targets `_WIN32_WINNT 0x0600` (Vista) and uses only APIs that
+exist on Vista and later: `GetLogicalDrives`, `GetDriveType`,
+`GetVolumeInformation`, `GetDiskFreeSpaceEx`, `WNetGetConnection`,
+`FindFirstVolumeW` / `GetVolumePathNamesForVolumeNameW`, and
+`IOCTL_STORAGE_QUERY_PROPERTY` (Vista added the storage property query).
+Serial numbers come from the same query, so on drives that do not report one
+the `Serial:` line is simply omitted. It is a 32/64-bit static binary with no
+runtime to install.
+
+The batch form relies on Windows PowerShell 2.0, which ships with Windows 7.
+On Vista it needs PowerShell 2.0 installed (it is available for Vista).
+
 ## Limitations
 
 - Path filters (`df C:\`) are accepted but only produce a warning; the full
   report is shown.
 - Cloud detection is name-based. A cloud mount named something else falls
-  into the `NET` block without the `[CLOUD]` tag.
+  into the `NET` block without the `[CLOUD]` tag. Cloud and network mounts
+  report `-` for `Type`, because the filesystem is decided by the remote
+  server, not the local machine.
 - Physical disk sizes are the vendor-stated sizes, so they can differ
   slightly from the sum of the volumes.
+- Serial numbers are only shown when the drive firmware reports them (common
+  for SATA/NVMe SSDs, less so for USB sticks).
 
 ## Documentation
 

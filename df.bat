@@ -28,7 +28,7 @@ function Show-DfHelp {
     Write-Host '  -h, --human-readable   print sizes in powers of 1024 (default)'
     Write-Host '  -H, --si               print sizes in powers of 1000'
     Write-Host '  -k                     print sizes in 1024-byte blocks'
-    Write-Host '  -T, --print-type       print the filesystem type column'
+    Write-Host '  -T, --print-type       accepted for df compatibility (Type is always shown)'
     Write-Host '  -a, --all              include volumes without a drive letter'
     Write-Host '      --no-color         do not colorize output'
     Write-Host '      --help             display this help and exit'
@@ -37,6 +37,13 @@ function Show-DfHelp {
     Write-Host '  Each physical disk is printed as a block, with all of its logical'
     Write-Host '  volumes (drive letters) listed underneath it. Network and cloud'
     Write-Host '  mounts are printed in a separate block and marked [NET] or [CLOUD].'
+    Write-Host ''
+    Write-Host 'Columns:'
+    Write-Host '  Volume       the drive letter (or ''-'' for a letterless volume)'
+    Write-Host '  Type         the filesystem (NTFS, FAT32, exFAT, ...)'
+    Write-Host '  Size/Used/Avail/Use%'
+    Write-Host '               space in bytes, and the percentage in use'
+    Write-Host '  Mounted on   the volume label, or the network/cloud provider'
 }
 
 function Format-DfSize {
@@ -103,6 +110,7 @@ foreach ($d in Get-WmiObject -Class Win32_DiskDrive) {
     $disks += New-Object PSObject -Property @{
         Number = [int]$d.Index
         Name   = [string]$d.Model
+        Serial = ([string]$d.SerialNumber).Trim()
         Size   = [double]$d.Size
         Bus    = [string]$d.InterfaceType
         Media  = $media
@@ -143,6 +151,25 @@ foreach ($v in Get-WmiObject -Class Win32_LogicalDisk) {
     }
 }
 
+# ---- letterless volumes (only with -a) ----
+if ($All) {
+    foreach ($v in Get-WmiObject -Class Win32_Volume) {
+        if ($v.DriveLetter) { continue }
+        $size = 0.0; if ($v.Capacity) { $size = [double]$v.Capacity }
+        $free = 0.0; if ($v.FreeSpace) { $free = [double]$v.FreeSpace }
+        $vols += New-Object PSObject -Property @{
+            Letter    = ''
+            Label     = [string]$v.Label
+            FS        = [string]$v.FileSystem
+            Size      = $size
+            Free      = $free
+            DriveType = 3
+            Provider  = ''
+            Disk      = -1
+        }
+    }
+}
+
 # ---- rendering ----
 function Write-DfLine {
     param([string]$Text, [string]$Color)
@@ -161,10 +188,7 @@ function Write-DfLine {
 }
 
 function Get-DfHeader {
-    if ($ShowType) {
-        return '  {0,-12} {1,-6} {2,9} {3,9} {4,9} {5,5}  {6}' -f 'Filesystem','Type','Size','Used','Avail','Use%','Mounted on'
-    }
-    return '  {0,-12} {1,9} {2,9} {3,9} {4,5}  {5}' -f 'Filesystem','Size','Used','Avail','Use%','Mounted on'
+    return '  {0,-8} {1,-8} {2,9} {3,9} {4,9} {5,5}  {6}' -f 'Volume','Type','Size','Used','Avail','Use%','Mounted on'
 }
 
 function Get-DfRow {
@@ -176,8 +200,8 @@ function Get-DfRow {
     $availS = Format-DfSize $Vol.Free $Si $Blocks
     $pct = '-'
     if ($Vol.Size -gt 0) { $pct = [string][int][math]::Round(($used / $Vol.Size) * 100) }
-    $fsname = '(none)'
-    if ($Vol.Letter) { $fsname = $Vol.Letter + ':' }
+    $volname = '-'
+    if ($Vol.Letter) { $volname = $Vol.Letter + ':' }
     $mount = $Vol.Label
     if (-not $mount) { if ($Vol.Provider) { $mount = $Vol.Provider } else { $mount = '-' } }
     $cls = Get-DfClass $Vol
@@ -185,15 +209,12 @@ function Get-DfRow {
     elseif ($cls -eq 'NET') { $mount = $mount + ' [NET]' }
     $fst = $Vol.FS
     if (-not $fst) { $fst = '-' }
-    if ($ShowType) {
-        return '  {0,-12} {1,-6} {2,9} {3,9} {4,9} {5,5}  {6}' -f $fsname,$fst,$sizeS,$usedS,$availS,$pct,$mount
-    }
-    return '  {0,-12} {1,9} {2,9} {3,9} {4,5}  {5}' -f $fsname,$sizeS,$usedS,$availS,$pct,$mount
+    return '  {0,-8} {1,-8} {2,9} {3,9} {4,9} {5,5}  {6}' -f $volname,$fst,$sizeS,$usedS,$availS,$pct,$mount
 }
 
 $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm'
 Write-DfLine '' ''
-Write-DfLine ("df for Windows  -  {0}" -f $stamp) 'DarkGray'
+Write-DfLine ("df for Windows  -  {0}" -f $stamp) ''
 
 $placed = @{}
 $rendered = 0
@@ -205,10 +226,10 @@ foreach ($disk in ($disks | Sort-Object Number)) {
         if ($v.Letter -and $v.Disk -eq $disk.Number) { $mine += $v }
     }
     if ($mine.Count -eq 0) { continue }
-    $diskSize = Format-DfSize $disk.Size $Si $Blocks
     Write-DfLine '' ''
-    Write-DfLine ("Physical disk {0}: {1}  ({2}, {3}, {4})" -f $disk.Number,$disk.Name,$diskSize,$disk.Media,$disk.Bus) 'Cyan'
-    Write-DfLine $header 'DarkGray'
+    Write-DfLine ("Physical disk {0}: {1}" -f $disk.Number,$disk.Name) 'Cyan'
+    if ($disk.Serial) { Write-DfLine ("  Serial: {0}" -f $disk.Serial) '' }
+    Write-DfLine $header ''
     foreach ($v in ($mine | Sort-Object Letter)) {
         Write-DfLine (Get-DfRow $v) ''
         $placed[$v.Letter] = $true
@@ -225,7 +246,7 @@ foreach ($v in $vols) {
 if ($othersLocal.Count -gt 0) {
     Write-DfLine '' ''
     Write-DfLine 'Other local volumes:' 'Cyan'
-    Write-DfLine $header 'DarkGray'
+    Write-DfLine $header ''
     foreach ($v in ($othersLocal | Sort-Object Letter)) { Write-DfLine (Get-DfRow $v) '' }
     $rendered++
 }
@@ -239,7 +260,7 @@ foreach ($v in $vols) {
 if ($othersNet.Count -gt 0) {
     Write-DfLine '' ''
     Write-DfLine 'Network and cloud mounts:' 'Yellow'
-    Write-DfLine $header 'DarkGray'
+    Write-DfLine $header ''
     foreach ($v in ($othersNet | Sort-Object Letter)) { Write-DfLine (Get-DfRow $v) '' }
     $rendered++
 }

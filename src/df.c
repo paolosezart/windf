@@ -5,7 +5,7 @@
  * disk and lists every logical volume (drive letter) underneath its disk,
  * in the style of coreutils df:
  *
- *     Filesystem  Type  Size  Used  Avail  Use%  Mounted on
+ *     Volume  Type  Size  Used  Avail  Use%  Mounted on
  *
  * Network and cloud mounts (rclone, Mega, OneDrive, WebDAV, mapped network
  * drives, ...) are printed in a separate block and tagged [NET] / [CLOUD].
@@ -45,6 +45,7 @@ typedef DfOptions Options;
 typedef struct {
     int       number;
     WCHAR     name[MAX_STR];
+    WCHAR     serial[MAX_STR];
     ULONGLONG size;
     WCHAR     bus[MAX_STR];
     WCHAR     media[MAX_STR];
@@ -213,11 +214,17 @@ static int enumerate_physical_disks(PhysicalDisk *disks, int max)
             if (desc->ProductIdOffset)
                 MultiByteToWideChar(CP_ACP, 0, (char *)outbuf + desc->ProductIdOffset,
                                     -1, product, 256);
+            if (desc->SerialNumberOffset)
+                MultiByteToWideChar(CP_ACP, 0, (char *)outbuf + desc->SerialNumberOffset,
+                                    -1, d->serial, MAX_STR);
 
             {
                 size_t L;
                 L = wcslen(vendor);  while (L && vendor[L-1]  == L' ') vendor[--L]  = 0;
                 L = wcslen(product); while (L && product[L-1] == L' ') product[--L] = 0;
+                L = wcslen(d->serial); while (L && (d->serial[L-1] == L' ' ||
+                                                    d->serial[L-1] == L'\t'))
+                    d->serial[--L] = 0;
             }
 
             if (vendor[0] || product[0])
@@ -267,7 +274,7 @@ static void volume_disk_number(WCHAR letter, Volume *v)
     CloseHandle(h);
 }
 
-static int enumerate_volumes(Volume *vols, int max)
+static int enumerate_volumes(Volume *vols, int max, int include_letterless)
 {
     DWORD mask = GetLogicalDrives();
     int count = 0;
@@ -310,8 +317,10 @@ static int enumerate_volumes(Volume *vols, int max)
         count++;
     }
 
-    /* Letterless volumes (recovery partitions etc.). */
-    {
+    /* Letterless volumes (recovery partitions etc.). Hidden by default: they
+     * show up as a wall of "(none) 0B" rows and are noise for a normal user.
+     * RAM disks and other odd volumes land here too. */
+    if (include_letterless) {
         WCHAR volname[MAX_PATH];
         HANDLE hfind = FindFirstVolumeW(volname, MAX_PATH);
         if (hfind != INVALID_HANDLE_VALUE) {
@@ -364,7 +373,7 @@ static void print_help(void)
 "  -h, --human-readable   print sizes in powers of 1024 (default)\n"
 "  -H, --si               print sizes in powers of 1000\n"
 "  -k                     print sizes in 1024-byte blocks\n"
-"  -T, --print-type       print the filesystem type column\n"
+"  -T, --print-type       accepted for df compatibility (Type is always shown)\n"
 "  -a, --all              include volumes without a drive letter\n"
 "      --no-color         do not colorize output\n"
 "      --help             display this help and exit\n"
@@ -372,7 +381,14 @@ static void print_help(void)
 "Output blocks:\n"
 "  Each physical disk is printed as a block, with all of its logical\n"
 "  volumes (drive letters) listed underneath it. Network and cloud\n"
-"  mounts are printed in a separate block and marked [NET] or [CLOUD].\n");
+"  mounts are printed in a separate block and marked [NET] or [CLOUD].\n"
+"\n"
+"Columns:\n"
+"  Volume       the drive letter (or '-' for a letterless volume)\n"
+"  Type         the filesystem (NTFS, FAT32, exFAT, ...)\n"
+"  Size/Used/Avail/Use%\n"
+"               space in bytes, and the percentage in use\n"
+"  Mounted on   the volume label, or the network/cloud provider\n");
 }
 
 static int parse_args(int argc, char **argv, Options *o)
@@ -426,33 +442,37 @@ static int parse_args(int argc, char **argv, Options *o)
 
 /* ------------------------------------------------------------------ */
 
-static void print_columns(const Options *o)
+/* One format string for both the header and the rows, so the columns can
+ * never drift apart. Volume is the drive letter; Type is the filesystem. */
+#define DF_ROW_FMT L"  %-8s %-8s %9s %9s %9s %5s  %s\n"
+
+static void print_columns(void)
 {
-    if (o->show_type)
-        outw(L"  Filesystem   Type        Size      Used     Avail  Use%  Mounted on\n");
-    else
-        outw(L"  Filesystem        Size      Used     Avail  Use%  Mounted on\n");
+    WCHAR row[MAX_STR * 2];
+    _snwprintf(row, sizeof(row)/sizeof(WCHAR), DF_ROW_FMT,
+               L"Volume", L"Type", L"Size", L"Used", L"Avail", L"Use%",
+               L"Mounted on");
+    outw(row);
 }
 
-static void print_date_line(const Options *o)
+static void print_date_line(void)
 {
     WCHAR wbuf[128];
     SYSTEMTIME st;
     GetLocalTime(&st);
     _snwprintf(wbuf, 128, L"\ndf for Windows  -  %04d-%02d-%02d %02d:%02d\n",
                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
-    set_color(o, FOREGROUND_INTENSITY);
     outw(wbuf);
-    reset_color(o);
 }
 
 static void print_volume_row(const Volume *v, const Options *o)
 {
-    WCHAR sizeS[64], usedS[64], availS[64], mount[MAX_STR], fsname[16];
+    WCHAR sizeS[64], usedS[64], availS[64], mount[MAX_STR], volname[16];
     WCHAR row[MAX_STR * 2];
     ULONGLONG used;
     int pct = -1;
     const WCHAR *tag;
+    const WCHAR *fst;
 
     format_size(v->size, o, sizeS, 64);
     used = v->size > v->free_bytes ? v->size - v->free_bytes : 0;
@@ -462,8 +482,10 @@ static void print_volume_row(const Volume *v, const Options *o)
     if (v->size > 0)
         pct = (int)(((double)used / (double)v->size) * 100.0 + 0.5);
 
-    if (v->letter) _snwprintf(fsname, 16, L"%c:", v->letter);
-    else           wcscpy(fsname, L"(none)");
+    if (v->letter) _snwprintf(volname, 16, L"%c:", v->letter);
+    else           wcscpy(volname, L"-");
+
+    fst = v->fs[0] ? v->fs : L"-";
 
     wcsncpy(mount, v->label[0] ? v->label
                     : (v->provider[0] ? v->provider : L"-"), MAX_STR - 1);
@@ -473,25 +495,14 @@ static void print_volume_row(const Volume *v, const Options *o)
     if (tag[0] && wcslen(mount) + wcslen(tag) + 1 < MAX_STR)
         wcscat(mount, tag);
 
-    if (o->show_type) {
-        const WCHAR *fst = v->fs[0] ? v->fs : L"-";
-        if (pct >= 0)
-            _snwprintf(row, sizeof(row)/sizeof(WCHAR),
-                       L"  %-12s %-6s %9s %9s %9s %5d  %s\n",
-                       fsname, fst, sizeS, usedS, availS, pct, mount);
-        else
-            _snwprintf(row, sizeof(row)/sizeof(WCHAR),
-                       L"  %-12s %-6s %9s %9s %9s %5s  %s\n",
-                       fsname, fst, sizeS, usedS, availS, L"-", mount);
+    if (pct >= 0) {
+        WCHAR pcts[8];
+        _snwprintf(pcts, 8, L"%d", pct);
+        _snwprintf(row, sizeof(row)/sizeof(WCHAR), DF_ROW_FMT,
+                   volname, fst, sizeS, usedS, availS, pcts, mount);
     } else {
-        if (pct >= 0)
-            _snwprintf(row, sizeof(row)/sizeof(WCHAR),
-                       L"  %-12s %9s %9s %9s %5d  %s\n",
-                       fsname, sizeS, usedS, availS, pct, mount);
-        else
-            _snwprintf(row, sizeof(row)/sizeof(WCHAR),
-                       L"  %-12s %9s %9s %9s %5s  %s\n",
-                       fsname, sizeS, usedS, availS, L"-", mount);
+        _snwprintf(row, sizeof(row)/sizeof(WCHAR), DF_ROW_FMT,
+                   volname, fst, sizeS, usedS, availS, L"-", mount);
     }
     outw(row);
 }
@@ -504,9 +515,9 @@ static int report(const Options *o)
     int *placed;
 
     ndisks = enumerate_physical_disks(disks, MAX_DISKS);
-    nvols = enumerate_volumes(volumes, MAX_VOLUMES);
+    nvols = enumerate_volumes(volumes, MAX_VOLUMES, o->all);
 
-    print_date_line(o);
+    print_date_line();
 
     placed = (int *)calloc(nvols ? (size_t)nvols : 1, sizeof(int));
 
@@ -524,7 +535,14 @@ static int report(const Options *o)
         set_color(o, FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY);
         outw(header);
         reset_color(o);
-        print_columns(o);
+
+        if (disks[d].serial[0]) {
+            _snwprintf(header, sizeof(header)/sizeof(WCHAR),
+                       L"  Serial: %s\n", disks[d].serial);
+            outw(header);
+        }
+
+        print_columns();
 
         for (i = 0; i < nvols; ++i) {
             if (volumes[i].letter && volumes[i].disk_number == disks[d].number) {
@@ -544,7 +562,7 @@ static int report(const Options *o)
             set_color(o, FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY);
             outw(L"\nOther local volumes:\n");
             reset_color(o);
-            print_columns(o);
+            print_columns();
             for (i = 0; i < nvols; ++i)
                 if (!placed[i] && classify_volume(&volumes[i]) == 0) {
                     print_volume_row(&volumes[i], o);
@@ -562,7 +580,7 @@ static int report(const Options *o)
             set_color(o, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
             outw(L"\nNetwork and cloud mounts:\n");
             reset_color(o);
-            print_columns(o);
+            print_columns();
             for (i = 0; i < nvols; ++i)
                 if (!placed[i] && classify_volume(&volumes[i]) != 0) {
                     print_volume_row(&volumes[i], o);
