@@ -84,4 +84,13 @@ static int df_classify(const wchar_t *label, const wchar_t *provider,
     return 0;
 }
 
+/* Merge a foreground color into the console's original attribute while
+ * keeping the original background. cmd.exe and Windows PowerShell default
+ * to a blue background (0x17), so writing a bare 0x07 leaves black holes
+ * wherever colored text is printed. */
+static unsigned df_merge_attr(unsigned orig, unsigned fg)
+{
+    return (orig & 0xF0u) | (fg & 0x0Fu);
+}
+
 #endif /* WINDF_FORMAT_H */

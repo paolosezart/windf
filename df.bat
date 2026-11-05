@@ -146,8 +146,18 @@ foreach ($v in Get-WmiObject -Class Win32_LogicalDisk) {
 # ---- rendering ----
 function Write-DfLine {
     param([string]$Text, [string]$Color)
-    if ($NoColor -or $Color -eq '') { Write-Host $Text }
-    else { Write-Host $Text -ForegroundColor $Color }
+    if ($NoColor -or $Color -eq '') { Write-Host $Text; return }
+    # Set only the foreground via .NET so the console background is preserved.
+    # Write-Host -ForegroundColor pulls the background from RawUI.BackgroundColor,
+    # which is often Black even when the window itself is blue.
+    try {
+        $prev = [Console]::ForegroundColor
+        [Console]::ForegroundColor = [ConsoleColor]$Color
+        Write-Host $Text
+        [Console]::ForegroundColor = $prev
+    } catch {
+        Write-Host $Text
+    }
 }
 
 function Get-DfHeader {

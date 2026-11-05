@@ -72,6 +72,24 @@ static int stdout_is_console(void)
     return GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode);
 }
 
+/* The console attribute in effect before we touch anything. Captured once so
+ * the background (blue in cmd/PowerShell, black in some setups) survives and
+ * is restored exactly, instead of being forced to the classic black. */
+static int  color_orig_saved = 0;
+static WORD color_orig_attr  = 0x07;
+
+static WORD console_orig_attr(void)
+{
+    if (!color_orig_saved) {
+        CONSOLE_SCREEN_BUFFER_INFO csbi;
+        color_orig_attr = 0x07;
+        if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
+            color_orig_attr = csbi.wAttributes;
+        color_orig_saved = 1;
+    }
+    return color_orig_attr;
+}
+
 /* Write a wide string to stdout. Uses WriteConsoleW on a real console and
  * UTF-8 bytes when redirected, which avoids all CRT locale problems. */
 static void outw(const WCHAR *s)
@@ -102,14 +120,14 @@ static void outa(const char *s)
 static void set_color(const Options *o, WORD attr)
 {
     if (o->no_color || !stdout_is_console()) return;
-    SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), attr);
+    SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE),
+                            (WORD)df_merge_attr(console_orig_attr(), attr));
 }
 
 static void reset_color(const Options *o)
 {
     if (o->no_color || !stdout_is_console()) return;
-    SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE),
-                            FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
+    SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), console_orig_attr());
 }
 
 /* Thin adapters over the shared helpers in df_format.h. */

@@ -63,6 +63,17 @@ Use the binary if you can. Use `df.bat` if you want a single file with no
 
 Short flags combine: `-hT` is the same as `-h -T`.
 
+## Colors
+
+Output is colorized when stdout is a real console, and stays plain when you
+pipe or redirect it. Only the foreground color is changed: the console
+background (the classic blue in `cmd.exe` and Windows PowerShell, or whatever
+you picked in Properties) is left alone and restored exactly when `df` exits.
+
+```
+df --no-color      turn coloring off
+```
+
 ## Download
 
 Grab the files from the [latest release](../../releases/latest):

@@ -1,0 +1,6 @@
+# cmd.exe requires CRLF in batch files; keep them that way in the repo
+# regardless of the platform git runs on.
+*.bat text eol=crlf
+
+# Windows binaries are binary.
+*.exe binary
