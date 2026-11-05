@@ -116,4 +116,28 @@ static void df_join_path(wchar_t *out, size_t cap, const wchar_t *dir,
     out[n] = 0;
 }
 
+/* Copy the directory part of a full path (everything before the last
+ * separator) into out. Used to place a temporary file next to its target
+ * so the final rename stays on one volume. */
+static void df_dirname(wchar_t *out, size_t cap, const wchar_t *path)
+{
+    const wchar_t *slash = NULL;
+    const wchar_t *p;
+    size_t n;
+
+    if (cap == 0)
+        return;
+    for (p = path; *p; ++p)
+        if (*p == L'\\' || *p == L'/') slash = p;
+    if (!slash) {
+        out[0] = L'.';
+        if (cap > 1) out[1] = 0;
+        return;
+    }
+    n = (size_t)(slash - path);
+    if (n >= cap) n = cap - 1;
+    wmemcpy(out, path, n);
+    out[n] = 0;
+}
+
 #endif /* WINDF_FORMAT_H */

@@ -60,6 +60,16 @@ static void check_merge(unsigned orig, unsigned fg, unsigned want)
     }
 }
 
+static void check_dirname(const wchar_t *path, const wchar_t *want)
+{
+    wchar_t got[512];
+    df_dirname(got, 512, path);
+    if (wcscmp(got, want) != 0) {
+        wprintf(L"FAIL dirname(%ls): got [%ls] want [%ls]\n", path, got, want);
+        failures++;
+    }
+}
+
 int main(void)
 {
     /* 1024-based, the default */
@@ -106,6 +116,12 @@ int main(void)
     check_join(L"C:\\",               L"df.exe",   L"C:\\df.exe");
     check_join(L"",                   L"df.exe",   L"df.exe");
     check_join(L"C:\\Windows",        L"",        L"C:\\Windows\\");
+
+    /* dirname: the directory part, for placing the temp file next to target */
+    check_dirname(L"C:\\Windows\\System32\\df.exe", L"C:\\Windows\\System32");
+    check_dirname(L"C:\\df.exe",                    L"C:");
+    check_dirname(L"df.exe",                        L".");
+    check_dirname(L"C:\\Windows\\System32\\",       L"C:\\Windows\\System32");
 
     if (failures == 0) {
         wprintf(L"all tests passed\n");

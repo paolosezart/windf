@@ -386,6 +386,8 @@ static void print_help(void)
 "  plain 'df' works from any folder: 64-bit goes to System32, 32-bit goes\n"
 "  to SysWOW64. On 32-bit Windows only System32 is used. If a df already\n"
 "  exists there, the command stops and says so; add -r to overwrite.\n"
+"  Replacing a df that is running works: the installed copy is swapped by\n"
+"  rename, so you do not have to close it first.\n"
 "\n"
 "Output blocks:\n"
 "  Each physical disk is printed as a block, with all of its logical\n"
@@ -737,30 +739,124 @@ static int df_read_all(const WCHAR *path, unsigned char **out, DWORD *outn)
     return 1;
 }
 
-static int df_write_all(const WCHAR *path, const unsigned char *data, DWORD n)
-{
-    HANDLE h;
-    DWORD off = 0, wrote;
-
-    h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                    FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE)
-        return 0;
-    while (off < n) {
-        if (!WriteFile(h, data + off, n - off, &wrote, NULL) || wrote == 0) {
-            CloseHandle(h);
-            return 0;
-        }
-        off += wrote;
-    }
-    CloseHandle(h);
-    return 1;
-}
-
 static int df_file_exists(const WCHAR *path)
 {
     DWORD a = GetFileAttributesW(path);
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* Write data to the target, surviving the case where the target is itself a
+ * running image (for example the user typed `df -i -r` from a copy that is
+ * already installed in System32).
+ *
+ * Windows will not let anything open a running .exe for writing, and it will
+ * not let MoveFileEx replace it in one step either. What it does allow is
+ * renaming the running image out of the way. So:
+ *
+ *   1. write the new bytes to a temp file beside the target
+ *   2. try a plain atomic replace (the fast path when the target is idle)
+ *   3. if that fails, rename the old image aside, move the new one in, then
+ *      delete the aside copy. Deleting it fails while that image still runs,
+ *      which is fine: a stale ~df*.old is harmless and is cleaned up on the
+ *      next successful install.
+ *
+ * Writing to a temp file first also means a failure never leaves a truncated
+ * binary in place. */
+static int df_write_atomic(const WCHAR *path, const unsigned char *data, DWORD n)
+{
+    WCHAR dir[MAX_PATH], tmp[MAX_PATH], old[MAX_PATH];
+    DWORD pid = GetCurrentProcessId();
+    HANDLE h;
+    DWORD off = 0, wrote;
+    int ok = 0;
+
+    df_dirname(dir, MAX_PATH, path);
+    _snwprintf(tmp, MAX_PATH, L"%s\\~df%lu.new", dir, (unsigned long)pid);
+    _snwprintf(old, MAX_PATH, L"%s\\~df%lu.old", dir, (unsigned long)pid);
+
+    h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    while (off < n) {
+        if (!WriteFile(h, data + off, n - off, &wrote, NULL) || wrote == 0)
+            break;
+        off += wrote;
+    }
+    CloseHandle(h);
+    if (off != n) {
+        DeleteFileW(tmp);
+        return 0;
+    }
+
+    if (MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        return 1;
+
+    /* The target is most likely a running image. Move it aside, put the new
+     * one in place, then try to drop the old copy. */
+    DeleteFileW(old);
+    if (!MoveFileExW(path, old, MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp);
+        return 0;
+    }
+    if (MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        ok = 1;
+        DeleteFileW(old);   /* best effort: fails while the old image runs */
+    } else {
+        MoveFileExW(old, path, MOVEFILE_REPLACE_EXISTING);  /* put it back */
+        DeleteFileW(tmp);
+    }
+    return ok;
+}
+
+/* Delete leftover "~df*.old" / "~df*.new" staging files from earlier
+ * installs. A copy that is still running cannot be deleted and is simply
+ * skipped; it will go on the next run, once no process holds it. Best
+ * effort by design. */
+static void df_clean_old(const WCHAR *dir)
+{
+    static const WCHAR *suffixes[] = { L"~df*.old", L"~df*.new" };
+    WCHAR pat[MAX_PATH], victim[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE f;
+    int s;
+
+    for (s = 0; s < 2; ++s) {
+        _snwprintf(pat, MAX_PATH, L"%s\\%s", dir, suffixes[s]);
+        f = FindFirstFileW(pat, &fd);
+        if (f == INVALID_HANDLE_VALUE)
+            continue;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                continue;
+            _snwprintf(victim, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
+            DeleteFileW(victim);
+        } while (FindNextFileW(f, &fd));
+        FindClose(f);
+    }
+}
+
+/* A dry run for the real write: create and delete a probe file in the target
+ * directory. This separates "the directory is not writable" (permissions,
+ * controlled folder access, Defender) from "the file is locked because it is
+ * running", so the error message can say which one it is. */
+static int df_dir_writable(const WCHAR *path)
+{
+    WCHAR dir[MAX_PATH], probe[MAX_PATH];
+    HANDLE h;
+    int ok;
+
+    df_dirname(dir, MAX_PATH, path);
+    _snwprintf(probe, MAX_PATH, L"%s\\~df%lu.probe",
+               dir, (unsigned long)GetCurrentProcessId());
+    h = CreateFileW(probe, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    ok = (h != INVALID_HANDLE_VALUE);
+    if (ok) {
+        CloseHandle(h);
+        DeleteFileW(probe);
+    }
+    return ok;
 }
 
 static int df_file_matches(const WCHAR *path, const unsigned char *data, DWORD n)
@@ -926,9 +1022,26 @@ static int df_install(const Options *o)
         return df_elevate(self, args);
     }
 
+    /* Fail early, with a message that names the real cause, if the system
+     * directory cannot be written at all. A running df.exe in that directory
+     * is not the problem: the swap below renames over it. */
     Wow64DisableWow64FsRedirection(&redir);
+    if (!df_dir_writable(t32)) {
+        Wow64RevertWow64FsRedirection(redir);
+        _snwprintf(msg, MAX_PATH*3,
+                   L"df: cannot write into %s (permissions or antivirus "
+                   L"blocked it)\n", sys32dir);
+        outw(msg);
+        free(self_data);
+        return 1;
+    }
+    Wow64RevertWow64FsRedirection(redir);
 
-    if (!df_write_all(t32, sys32_data, sys32_n)) {
+    Wow64DisableWow64FsRedirection(&redir);
+    df_clean_old(sys32dir);
+    df_clean_old(syswowdir);
+
+    if (!df_write_atomic(t32, sys32_data, sys32_n)) {
         Wow64RevertWow64FsRedirection(redir);
         _snwprintf(msg, MAX_PATH*3, L"df: could not write %s\n", t32);
         outw(msg);
@@ -949,7 +1062,7 @@ static int df_install(const Options *o)
                        L"df: note: no 32-bit image available; %s was not written\n",
                        twow);
             outw(msg);
-        } else if (df_write_all(twow, img32, img32_n)) {
+        } else if (df_write_atomic(twow, img32, img32_n)) {
             if (o->replace) {
                 _snwprintf(msg, MAX_PATH*3, L"df: replaced %s\n", twow);
                 outw(msg);

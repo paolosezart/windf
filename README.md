@@ -76,7 +76,9 @@ What gets written, and where:
 | 32-bit Windows | 32-bit build | (not used) |
 
 The 64-bit code is taken from a resource embedded in `df.exe` and written
-straight into `System32` — nothing is ever dropped into a temporary folder.
+straight into `System32`. Nothing is ever dropped into a temporary folder; the
+only staging file is created beside its target in the system directory and
+removed by the same install.
 If the process is not elevated it asks for administrator rights once
 (a UAC prompt) and repeats the same request elevated.
 
@@ -90,7 +92,15 @@ df: the installed copy is the same version. Use -r to replace it anyway.
 ```
 
 Add `-r` (`--replace`) to overwrite. The installer never deletes a file it
-did not just write; it only overwrites the `df.*` names above.
+did not just write; it only overwrites the `df.*` names above, plus its own
+`~df*.old` leftovers from an earlier run.
+
+Replacing a copy that is currently running is fine. Windows refuses to open a
+running `.exe` for writing, so the installer writes the new image next to the
+target and swaps it in by rename, which Windows does allow on a running image.
+There is nothing to close first, and a failed write never leaves a truncated
+binary behind. The displaced image is left as `~df<pid>.old` only while it is
+still running and is removed by the next install.
 
 Use the binary if you can. Use `df.bat` if you want a single file with no
 `exe` (some locked-down machines block unsigned executables). `df.bat`
@@ -242,7 +252,9 @@ The binary (`src/df.c`) uses only stable Win32 APIs:
 
 The installer uses `GetModuleFileNameW` (self path), `GetWindowsDirectoryW`
 (`System32`/`SysWOW64`), `FindResourceW`/`LoadResource` (the embedded
-64-bit image), `ShellExecuteExW` with the `runas` verb (UAC elevation),
+64-bit image), `MoveFileExW` (swap the new image in; a plain replace first,
+then rename-aside for a running target), `ShellExecuteExW` with the `runas`
+verb (UAC elevation),
 `GetTokenInformation` (`TokenElevation`), and
 `Wow64DisableWow64FsRedirection` so a 32-bit process writes the real
 `System32` rather than being redirected to `SysWOW64`.
