@@ -19,6 +19,8 @@ typedef struct {
     int show_type;
     int all;
     int no_color;
+    int install;
+    int replace;
 } DfOptions;
 
 #ifdef _WIN32
@@ -91,6 +93,27 @@ static int df_classify(const wchar_t *label, const wchar_t *provider,
 static unsigned df_merge_attr(unsigned orig, unsigned fg)
 {
     return (orig & 0xF0u) | (fg & 0x0Fu);
+}
+
+/* Join a directory and a child into a wide path, using a backslash. Keeps
+ * exactly one separator when the directory already ends with one. */
+static void df_join_path(wchar_t *out, size_t cap, const wchar_t *dir,
+                         const wchar_t *child)
+{
+    size_t n = wcslen(dir);
+    if (cap == 0)
+        return;
+    if (n >= cap)
+        n = cap - 1;
+    wmemcpy(out, dir, n);
+    if (n > 0 && dir[n - 1] != L'\\' && dir[n - 1] != L'/') {
+        if (n + 1 < cap) out[n++] = L'\\';
+    }
+    {
+        size_t i = 0;
+        while (child[i] && n + 1 < cap) out[n++] = child[i++];
+    }
+    out[n] = 0;
 }
 
 #endif /* WINDF_FORMAT_H */

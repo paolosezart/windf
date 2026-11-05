@@ -27,6 +27,18 @@ static void check_size(unsigned long long bytes, int si, int blocks,
     }
 }
 
+static void check_join(const wchar_t *dir, const wchar_t *child,
+                       const wchar_t *want)
+{
+    wchar_t got[512];
+    df_join_path(got, 512, dir, child);
+    if (wcscmp(got, want) != 0) {
+        wprintf(L"FAIL join(%ls, %ls): got [%ls] want [%ls]\n",
+                dir, child, got, want);
+        failures++;
+    }
+}
+
 static void check_class(const wchar_t *label, const wchar_t *provider,
                         int drive_type, int want)
 {
@@ -86,6 +98,14 @@ int main(void)
     check_merge(0x07, 0x07, 0x07);  /* classic black console unchanged         */
     check_merge(0x1F, 0x0D, 0x1D);  /* bright white bg + magenta fg            */
     check_merge(0x00, 0x0F, 0x0F);  /* zero original, bright white fg          */
+
+    /* path joining */
+    check_join(L"C:\\Windows",        L"System32", L"C:\\Windows\\System32");
+    check_join(L"C:\\Windows\\",      L"System32", L"C:\\Windows\\System32");
+    check_join(L"C:\\Windows/",       L"System32", L"C:\\Windows/System32");
+    check_join(L"C:\\",               L"df.exe",   L"C:\\df.exe");
+    check_join(L"",                   L"df.exe",   L"df.exe");
+    check_join(L"C:\\Windows",        L"",        L"C:\\Windows\\");
 
     if (failures == 0) {
         wprintf(L"all tests passed\n");

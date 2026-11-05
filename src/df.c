@@ -28,6 +28,7 @@
 
 #include <windows.h>
 #include <winioctl.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -376,7 +377,15 @@ static void print_help(void)
 "  -T, --print-type       accepted for df compatibility (Type is always shown)\n"
 "  -a, --all              include volumes without a drive letter\n"
 "      --no-color         do not colorize output\n"
+"  -i, --install          copy df into the Windows system directories\n"
+"  -r, --replace          with --install, overwrite an existing df\n"
 "      --help             display this help and exit\n"
+"\n"
+"Install:\n"
+"  df --install copies the right build into the system directories so that\n"
+"  plain 'df' works from any folder: 64-bit goes to System32, 32-bit goes\n"
+"  to SysWOW64. On 32-bit Windows only System32 is used. If a df already\n"
+"  exists there, the command stops and says so; add -r to overwrite.\n"
 "\n"
 "Output blocks:\n"
 "  Each physical disk is printed as a block, with all of its logical\n"
@@ -406,6 +415,9 @@ static int parse_args(int argc, char **argv, Options *o)
         else if (!strcmp(a, "-T") || !strcmp(a, "--print-type")) o->show_type = 1;
         else if (!strcmp(a, "-a") || !strcmp(a, "--all")) o->all = 1;
         else if (!strcmp(a, "--no-color")) o->no_color = 1;
+        else if (!strcmp(a, "--install")) o->install = 1;
+        else if (!strcmp(a, "-i")) o->install = 1;
+        else if (!strcmp(a, "--replace") || !strcmp(a, "-r")) o->replace = 1;
         else if (!strcmp(a, "--help") || !strcmp(a, "-?")) { print_help(); return 1; }
         else if (a[0] == '-' && a[1] && a[1] != '-') {
             const char *p;
@@ -415,6 +427,8 @@ static int parse_args(int argc, char **argv, Options *o)
                 else if (*p == 'k') { o->blocks = 1; o->si = 0; }
                 else if (*p == 'T') o->show_type = 1;
                 else if (*p == 'a') o->all = 1;
+                else if (*p == 'i') o->install = 1;
+                else if (*p == 'r') o->replace = 1;
                 else {
                     char msg[64];
                     _snprintf(msg, sizeof(msg), "df: invalid option -- '%c'\n", *p);
@@ -601,6 +615,360 @@ static int report(const Options *o)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Installer                                                           */
+/*                                                                     */
+/* Windows cannot load two machines from one PE image, so the single    */
+/* shipped file is a 32-bit image that carries the 64-bit build as an   */
+/* RCDATA resource (id 101). The 64-bit code is only materialised at    */
+/* install time, straight into System32. Nothing is written to a temp   */
+/* folder, ever.                                                        */
+/*                                                                     */
+/* Which image goes where:                                             */
+/*   System32  the native image for this machine (64-bit on a 64-bit   */
+/*             OS)                                                      */
+/*   SysWOW64  the 32-bit image, only on a 64-bit OS                   */
+/* ------------------------------------------------------------------ */
+
+#define DF_PAYLOAD_ID 101
+
+#ifdef _WIN64
+#define DF_SELF_IS_64 1
+#else
+#define DF_SELF_IS_64 0
+#endif
+
+static int df_is_admin(void)
+{
+    HANDLE tok;
+    TOKEN_ELEVATION el;
+    DWORD sz = 0;
+    int elevated = 0;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok))
+        return 0;
+    el.TokenIsElevated = 0;
+    if (GetTokenInformation(tok, TokenElevation, &el, sizeof(el), &sz))
+        elevated = el.TokenIsElevated ? 1 : 0;
+    CloseHandle(tok);
+    return elevated;
+}
+
+static int df_system_is_64(void)
+{
+    SYSTEM_INFO si;
+    GetNativeSystemInfo(&si);
+    if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64)
+        return 1;
+#ifdef PROCESSOR_ARCHITECTURE_ARM64
+    if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64)
+        return 1;
+#endif
+#ifdef PROCESSOR_ARCHITECTURE_IA64
+    if (si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_IA64)
+        return 1;
+#endif
+    return 0;
+}
+
+static int df_self_path(WCHAR *buf, DWORD n)
+{
+    DWORD len = GetModuleFileNameW(NULL, buf, n);
+    return len > 0 && len < n;
+}
+
+static int df_payload(const unsigned char **data, DWORD *size)
+{
+    HRSRC r;
+    HGLOBAL g;
+    void *p;
+
+    r = FindResourceW(NULL, MAKEINTRESOURCEW(DF_PAYLOAD_ID), (LPCWSTR)RT_RCDATA);
+    if (!r)
+        return 0;
+    *size = SizeofResource(NULL, r);
+    if (*size == 0)
+        return 0;
+    g = LoadResource(NULL, r);
+    if (!g)
+        return 0;
+    p = LockResource(g);
+    if (!p)
+        return 0;
+    *data = (const unsigned char *)p;
+    return 1;
+}
+
+static int df_read_all(const WCHAR *path, unsigned char **out, DWORD *outn)
+{
+    HANDLE h;
+    DWORD size, got, off;
+    unsigned char *buf;
+
+    *out = NULL;
+    *outn = 0;
+    h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    size = GetFileSize(h, NULL);
+    if (size == INVALID_FILE_SIZE) {
+        CloseHandle(h);
+        return 0;
+    }
+    buf = (unsigned char *)malloc(size ? size : 1);
+    if (!buf) {
+        CloseHandle(h);
+        return 0;
+    }
+    off = 0;
+    while (off < size) {
+        if (!ReadFile(h, buf + off, size - off, &got, NULL) || got == 0)
+            break;
+        off += got;
+    }
+    CloseHandle(h);
+    if (off != size) {
+        free(buf);
+        return 0;
+    }
+    *out = buf;
+    *outn = size;
+    return 1;
+}
+
+static int df_write_all(const WCHAR *path, const unsigned char *data, DWORD n)
+{
+    HANDLE h;
+    DWORD off = 0, wrote;
+
+    h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    while (off < n) {
+        if (!WriteFile(h, data + off, n - off, &wrote, NULL) || wrote == 0) {
+            CloseHandle(h);
+            return 0;
+        }
+        off += wrote;
+    }
+    CloseHandle(h);
+    return 1;
+}
+
+static int df_file_exists(const WCHAR *path)
+{
+    DWORD a = GetFileAttributesW(path);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static int df_file_matches(const WCHAR *path, const unsigned char *data, DWORD n)
+{
+    unsigned char *have;
+    DWORD hn;
+    int same;
+
+    if (!df_read_all(path, &have, &hn))
+        return 0;
+    same = (hn == n) && (n == 0 || memcmp(have, data, n) == 0);
+    free(have);
+    return same;
+}
+
+/* Rebuild the command line minus the program name, so an elevated child
+ * repeats exactly the same request. */
+static void df_forward_args(WCHAR *out, DWORD n)
+{
+    const WCHAR *cl = GetCommandLineW();
+    const WCHAR *p = cl;
+    DWORD i = 0;
+
+    if (*p == L'"') {
+        p++;
+        while (*p && *p != L'"') p++;
+        if (*p == L'"') p++;
+    } else {
+        while (*p && *p != L' ' && *p != L'\t') p++;
+    }
+    while (*p == L' ' || *p == L'\t') p++;
+    while (*p && i + 1 < n) out[i++] = *p++;
+    out[i] = 0;
+}
+
+static int df_elevate(const WCHAR *self, const WCHAR *args)
+{
+    SHELLEXECUTEINFOW sei;
+    DWORD code = 1;
+
+    memset(&sei, 0, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    sei.lpVerb = L"runas";
+    sei.lpFile = self;
+    sei.lpParameters = args;
+    sei.nShow = SW_SHOWNORMAL;
+
+    if (!ShellExecuteExW(&sei)) {
+        if (GetLastError() == ERROR_CANCELLED)
+            outw(L"df: elevation was cancelled; nothing was installed\n");
+        else
+            outw(L"df: could not request administrator rights\n");
+        return 1;
+    }
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, INFINITE);
+        GetExitCodeProcess(sei.hProcess, &code);
+        CloseHandle(sei.hProcess);
+    }
+    return (int)code;
+}
+
+static int df_install(const Options *o)
+{
+    WCHAR self[MAX_PATH], windir[MAX_PATH];
+    WCHAR sys32dir[MAX_PATH], syswowdir[MAX_PATH];
+    WCHAR t32[MAX_PATH], twow[MAX_PATH], tbat[MAX_PATH], tcmd[MAX_PATH];
+    WCHAR msg[MAX_PATH * 3];
+    unsigned char *self_data = NULL;
+    DWORD self_n = 0;
+    const unsigned char *payload = NULL;
+    DWORD payload_n = 0;
+    const unsigned char *img32, *img64;
+    DWORD img32_n, img64_n;
+    const unsigned char *sys32_data;
+    DWORD sys32_n;
+    int is64, have_payload, exists = 0, same = 0;
+    PVOID redir = NULL;
+
+    if (!df_self_path(self, MAX_PATH)) {
+        outw(L"df: cannot determine the path of this program\n");
+        return 1;
+    }
+    if (!df_read_all(self, &self_data, &self_n)) {
+        outw(L"df: cannot read this program's own file\n");
+        return 1;
+    }
+    have_payload = df_payload(&payload, &payload_n);
+    is64 = df_system_is_64();
+
+    if (!GetWindowsDirectoryW(windir, MAX_PATH)) {
+        outw(L"df: cannot locate the Windows directory\n");
+        free(self_data);
+        return 1;
+    }
+    df_join_path(sys32dir,  MAX_PATH, windir, L"System32");
+    df_join_path(syswowdir, MAX_PATH, windir, L"SysWOW64");
+    df_join_path(t32,  MAX_PATH, sys32dir,  L"df.exe");
+    df_join_path(twow, MAX_PATH, syswowdir, L"df.exe");
+    df_join_path(tbat, MAX_PATH, sys32dir,  L"df.bat");
+    df_join_path(tcmd, MAX_PATH, sys32dir,  L"df.cmd");
+
+    /* Decide which bytes are the 32-bit and the 64-bit image.
+     *   - A universal 32-bit build carries the 64-bit image as a payload,
+     *     so its own bytes are the 32-bit image.
+     *   - A plain 64-bit build is itself the 64-bit image; it has no
+     *     32-bit image, and it is pointless on a 32-bit OS anyway. */
+    if (DF_SELF_IS_64) {
+        img64 = self_data;
+        img64_n = self_n;
+        if (have_payload) { img32 = payload; img32_n = payload_n; }
+        else              { img32 = NULL;    img32_n = 0; }
+    } else {
+        img32 = self_data;
+        img32_n = self_n;
+        if (have_payload) { img64 = payload; img64_n = payload_n; }
+        else              { img64 = NULL;    img64_n = 0; }
+    }
+
+    /* System32 gets the native image: 64-bit on a 64-bit OS, otherwise the
+     * 32-bit one (which is what runs on a 32-bit OS). */
+    if (is64 && img64) {
+        sys32_data = img64;
+        sys32_n = img64_n;
+    } else if (img32) {
+        sys32_data = img32;
+        sys32_n = img32_n;
+    } else {
+        outw(L"df: this build cannot produce an image for this system\n");
+        free(self_data);
+        return 1;
+    }
+
+    /* Look for an existing df. Redirection must be off so a 32-bit process
+     * sees the real System32, not SysWOW64. */
+    Wow64DisableWow64FsRedirection(&redir);
+    if (df_file_exists(t32))  { exists = 1; same = df_file_matches(t32, sys32_data, sys32_n); }
+    if (is64 && df_file_exists(twow)) exists = 1;
+    if (df_file_exists(tbat)) exists = 1;
+    if (df_file_exists(tcmd)) exists = 1;
+    Wow64RevertWow64FsRedirection(redir);
+
+    if (exists && !o->replace) {
+        outw(L"df: a df is already installed in the Windows directory:\n");
+        if (df_file_exists(t32))  { _snwprintf(msg, MAX_PATH*3, L"    %s\n", t32);  outw(msg); }
+        if (is64 && df_file_exists(twow)) { _snwprintf(msg, MAX_PATH*3, L"    %s\n", twow); outw(msg); }
+        if (df_file_exists(tbat)) { _snwprintf(msg, MAX_PATH*3, L"    %s\n", tbat); outw(msg); }
+        if (df_file_exists(tcmd)) { _snwprintf(msg, MAX_PATH*3, L"    %s\n", tcmd); outw(msg); }
+        if (same)
+            outw(L"df: the installed copy is the same version. Use -r to replace it anyway.\n");
+        else
+            outw(L"df: use -r (--replace) to overwrite it.\n");
+        free(self_data);
+        return 1;
+    }
+
+    if (!df_is_admin()) {
+        WCHAR args[4096];
+        df_forward_args(args, 4096);
+        outw(L"df: administrator rights are required; requesting elevation...\n");
+        free(self_data);
+        return df_elevate(self, args);
+    }
+
+    Wow64DisableWow64FsRedirection(&redir);
+
+    if (!df_write_all(t32, sys32_data, sys32_n)) {
+        Wow64RevertWow64FsRedirection(redir);
+        _snwprintf(msg, MAX_PATH*3, L"df: could not write %s\n", t32);
+        outw(msg);
+        free(self_data);
+        return 1;
+    }
+    if (o->replace) {
+        _snwprintf(msg, MAX_PATH*3, L"df: replaced %s\n", t32);
+        outw(msg);
+    } else {
+        _snwprintf(msg, MAX_PATH*3, L"df: installed %s\n", t32);
+        outw(msg);
+    }
+
+    if (is64) {
+        if (!img32) {
+            _snwprintf(msg, MAX_PATH*3,
+                       L"df: note: no 32-bit image available; %s was not written\n",
+                       twow);
+            outw(msg);
+        } else if (df_write_all(twow, img32, img32_n)) {
+            if (o->replace) {
+                _snwprintf(msg, MAX_PATH*3, L"df: replaced %s\n", twow);
+                outw(msg);
+            } else {
+                _snwprintf(msg, MAX_PATH*3, L"df: installed %s\n", twow);
+                outw(msg);
+            }
+        } else {
+            _snwprintf(msg, MAX_PATH*3, L"df: could not write %s\n", twow);
+            outw(msg);
+        }
+    }
+    Wow64RevertWow64FsRedirection(redir);
+
+    outw(L"df: done. Type 'df' from any folder to use it.\n");
+    free(self_data);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     Options o;
@@ -609,6 +977,12 @@ int main(int argc, char **argv)
     rc = parse_args(argc, argv, &o);
     if (rc != 0)
         return rc > 0 ? 0 : 2;
+
+    if (o.install)
+        return df_install(&o);
+
+    if (o.replace)
+        outw(L"df: -r/--replace only applies with --install\n");
 
     return report(&o);
 }

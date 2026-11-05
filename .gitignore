@@ -3,6 +3,9 @@
 *.obj
 dist/df-selftest
 
+# Generated resource intermediate for the universal build
+dist/payload.rc
+
 # The Windows binaries in dist/ are committed on purpose so they can be
 # downloaded straight from the repository page. CI also builds them as
 # workflow artifacts and release assets.

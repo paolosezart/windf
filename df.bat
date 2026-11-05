@@ -33,6 +33,10 @@ function Show-DfHelp {
     Write-Host '      --no-color         do not colorize output'
     Write-Host '      --help             display this help and exit'
     Write-Host ''
+    Write-Host 'Install (df.exe only):'
+    Write-Host '  df.exe --install       copy df into System32 and SysWOW64'
+    Write-Host '  df.exe --install -r    overwrite an existing df'
+    Write-Host ''
     Write-Host 'Output blocks:'
     Write-Host '  Each physical disk is printed as a block, with all of its logical'
     Write-Host '  volumes (drive letters) listed underneath it. Network and cloud'
@@ -85,6 +89,13 @@ foreach ($a in $argList) {
     elseif ($a -ceq '-T' -or $a -ceq '--print-type') { $ShowType = $true }
     elseif ($a -ceq '-a' -or $a -ceq '--all') { $All = $true }
     elseif ($a -ceq '--no-color') { $NoColor = $true }
+    elseif ($a -ceq '--install' -or $a -ceq '-i' -or
+            $a -ceq '--replace' -or $a -ceq '-r' -or
+            $a -cmatch '^-[ir]+$') {
+        Write-Host 'df: --install is only available in the df.exe build.'
+        Write-Host '   Run:  df.exe --install'
+        exit 2
+    }
     elseif ($a -cmatch '^-[hHkTa]+$') {
         foreach ($c in $a.Substring(1).ToCharArray()) {
             if ($c -ceq 'h') { }

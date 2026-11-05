@@ -40,17 +40,62 @@ Network and cloud mounts:
 
 | Form | File | Needs | Runs on |
 | --- | --- | --- | --- |
-| Native binary | `dist/df-x64.exe`, `dist/df-x86.exe` | nothing | Windows Vista and later |
+| Universal binary | `dist/df.exe` | nothing | 32-bit and 64-bit Windows |
+| Native binaries | `dist/df-x64.exe`, `dist/df-x86.exe` | nothing | Windows Vista and later |
 | Single script | `df.bat` | built-in PowerShell | Windows Vista and later |
 
-Both are self-contained. No .NET installation, no Visual C++ runtime, no
-external DLLs. The native binaries link only against `KERNEL32`, `MPR` and
-`msvcrt`, which are part of every Windows install. The batch file carries
-an embedded PowerShell 2.0 script and uses only `Get-WmiObject`, so it works
-on a freshly installed Vista or 7.
+`df.exe` is a single file that runs on both 32-bit and 64-bit Windows. It is
+a 32-bit image that carries the 64-bit build inside it, so `--install` can
+place the right code in each system directory (see below). The dedicated
+`df-x64.exe` and `df-x86.exe` are the same program without the payload, if
+you prefer one file per architecture.
+
+All of them are self-contained. No .NET installation, no Visual C++ runtime,
+no external DLLs. The native binaries link only against `KERNEL32`, `MPR`
+and `msvcrt`, which are part of every Windows install. The batch file
+carries an embedded PowerShell 2.0 script and uses only `Get-WmiObject`, so
+it works on a freshly installed Vista or 7.
+
+## Install
+
+`df.exe` can copy itself into the Windows directory so that plain `df` works
+from any folder:
+
+```
+df.exe --install        copy df into System32 (and SysWOW64 on 64-bit)
+df.exe -i               same thing, short form
+df.exe --install -r     overwrite an existing df
+df.exe -i -r            same, short forms combined as -ri
+```
+
+What gets written, and where:
+
+| System | `System32` | `SysWOW64` |
+| --- | --- | --- |
+| 64-bit Windows | 64-bit build | 32-bit build |
+| 32-bit Windows | 32-bit build | (not used) |
+
+The 64-bit code is taken from a resource embedded in `df.exe` and written
+straight into `System32` — nothing is ever dropped into a temporary folder.
+If the process is not elevated it asks for administrator rights once
+(a UAC prompt) and repeats the same request elevated.
+
+If a `df.exe`, `df.bat` or `df.cmd` already exists in the Windows directory,
+the command stops and lists what it found:
+
+```
+df: a df is already installed in the Windows directory:
+    C:\Windows\System32\df.exe
+df: the installed copy is the same version. Use -r to replace it anyway.
+```
+
+Add `-r` (`--replace`) to overwrite. The installer never deletes a file it
+did not just write; it only overwrites the `df.*` names above.
 
 Use the binary if you can. Use `df.bat` if you want a single file with no
-`exe` (some locked-down machines block unsigned executables).
+`exe` (some locked-down machines block unsigned executables). `df.bat`
+cannot install itself; running `df.bat --install` prints a pointer to
+`df.exe`.
 
 ## Options
 
@@ -61,6 +106,8 @@ Use the binary if you can. Use `df.bat` if you want a single file with no
 -T, --print-type       accepted for df compatibility (Type is always shown)
 -a, --all              include volumes without a drive letter
     --no-color         do not colorize output
+-i, --install          copy df into the Windows system directories
+-r, --replace          with --install, overwrite an existing df
     --help             display this help and exit
 ```
 
@@ -101,8 +148,9 @@ Grab the files from the [latest release](../../releases/latest):
 
 | File | Architecture | Notes |
 | --- | --- | --- |
-| [`df-x64.exe`](../../releases/latest/download/df-x64.exe) | 64-bit (x86-64) | most common |
-| [`df-x86.exe`](../../releases/latest/download/df-x86.exe) | 32-bit (i386) | 32-bit Windows |
+| [`df.exe`](../../releases/latest/download/df.exe) | 32-bit and 64-bit | one file, can `--install` |
+| [`df-x64.exe`](../../releases/latest/download/df-x64.exe) | 64-bit (x86-64) | native only |
+| [`df-x86.exe`](../../releases/latest/download/df-x86.exe) | 32-bit (i386) | native only |
 | [`df.bat`](../../releases/latest/download/df.bat) | any | single file, no `exe` |
 | [`SHA256SUMS.txt`](../../releases/latest/download/SHA256SUMS.txt) | — | checksums |
 
@@ -110,14 +158,28 @@ Verify a download with:
 
 ```
 sha256sum -c SHA256SUMS.txt      # Linux / Git Bash
-certutil -hashfile df-x64.exe SHA256   # Windows
+certutil -hashfile df.exe SHA256 # Windows
 ```
 
 ## Install
 
-### Native binary
+### One command (recommended)
 
-1. Download `df-x64.exe` (64-bit Windows) or `df-x86.exe` (32-bit Windows).
+Download `df.exe` and run it with administrator rights:
+
+```
+df.exe --install
+```
+
+It copies the 64-bit build to `System32` and the 32-bit build to `SysWOW64`
+(on 32-bit Windows, just `System32`), so plain `df` works everywhere. See
+[Install](#install) above for the overwrite rules. This is the only form
+that installs itself.
+
+### Manual: native binary
+
+1. Download `df.exe` (both architectures), `df-x64.exe` (64-bit) or
+   `df-x86.exe` (32-bit).
 2. Rename to `df.exe`, put it in a folder on your `PATH` (for example
    `C:\tools`), and run `df` from any prompt.
 
@@ -144,9 +206,14 @@ To call it as plain `df`, add its folder to `PATH` as above.
 Only a MinGW-w64 toolchain is needed.
 
 ```
-make            # builds dist/df-x64.exe and dist/df-x86.exe
+make            # builds dist/df.exe, dist/df-x64.exe and dist/df-x86.exe
 make test       # runs the option/format self-tests
 ```
+
+`make` builds the standalone 64-bit and 32-bit binaries, then embeds the
+64-bit one into the 32-bit one as resource 101 to produce the universal
+`df.exe`. `tools/check_payload.py` verifies that the embedded copy matches
+the standalone build; CI runs it on every push.
 
 Or directly:
 
@@ -155,7 +222,7 @@ x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o dist/df-x64.exe src/df.c -static -s 
 i686-w64-mingw32-gcc   -O2 -Wall -Wextra -o dist/df-x86.exe src/df.c -static -s -lmpr
 ```
 
-`.github/workflows/build.yml` builds both binaries on every push and
+`.github/workflows/build.yml` builds all three binaries on every push and
 attaches them to a release when a tag is pushed.
 
 ## How it works
@@ -172,6 +239,13 @@ The binary (`src/df.c`) uses only stable Win32 APIs:
   volume to its physical disk number.
 - `FindFirstVolumeW`, `GetVolumePathNamesForVolumeNameW` — volumes without a
   drive letter (recovery partitions); shown only with `-a`.
+
+The installer uses `GetModuleFileNameW` (self path), `GetWindowsDirectoryW`
+(`System32`/`SysWOW64`), `FindResourceW`/`LoadResource` (the embedded
+64-bit image), `ShellExecuteExW` with the `runas` verb (UAC elevation),
+`GetTokenInformation` (`TokenElevation`), and
+`Wow64DisableWow64FsRedirection` so a 32-bit process writes the real
+`System32` rather than being redirected to `SysWOW64`.
 
 The batch file reaches the same result through WMI: `Win32_DiskDrive`,
 `Win32_DiskDriveToDiskPartition`, `Win32_LogicalDiskToPartition`,
@@ -215,6 +289,12 @@ On Vista it needs PowerShell 2.0 installed (it is available for Vista).
   slightly from the sum of the volumes.
 - Serial numbers are only shown when the drive firmware reports them (common
   for SATA/NVMe SSDs, less so for USB sticks).
+- `--install` needs administrator rights. It writes only `df.exe` (and
+  detects an existing `df.bat` / `df.cmd`) in the Windows directory; it does
+  not touch the registry or `PATH`.
+- The universal `df.exe` is a 32-bit image. On 64-bit Windows it runs under
+  WOW64 when you launch it directly, which is fine for a read-only report;
+  the copy installed into `System32` is the native 64-bit build.
 
 ## Documentation
 
