@@ -63,12 +63,29 @@ Use the binary if you can. Use `df.bat` if you want a single file with no
 
 Short flags combine: `-hT` is the same as `-h -T`.
 
+## Download
+
+Grab the files from the [latest release](../../releases/latest):
+
+| File | Architecture | Notes |
+| --- | --- | --- |
+| [`df-x64.exe`](../../releases/latest/download/df-x64.exe) | 64-bit (x86-64) | most common |
+| [`df-x86.exe`](../../releases/latest/download/df-x86.exe) | 32-bit (i386) | 32-bit Windows |
+| [`df.bat`](../../releases/latest/download/df.bat) | any | single file, no `exe` |
+| [`SHA256SUMS.txt`](../../releases/latest/download/SHA256SUMS.txt) | — | checksums |
+
+Verify a download with:
+
+```
+sha256sum -c SHA256SUMS.txt      # Linux / Git Bash
+certutil -hashfile df-x64.exe SHA256   # Windows
+```
+
 ## Install
 
 ### Native binary
 
-1. Download `df-x64.exe` (64-bit Windows) or `df-x86.exe` (32-bit Windows)
-   from the [Releases](../../releases) page, or take them from `dist/`.
+1. Download `df-x64.exe` (64-bit Windows) or `df-x86.exe` (32-bit Windows).
 2. Rename to `df.exe`, put it in a folder on your `PATH` (for example
    `C:\tools`), and run `df` from any prompt.
 

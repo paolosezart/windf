@@ -33,7 +33,12 @@ jobs:
           i686-w64-mingw32-objdump   -f dist/df-x86.exe | grep -q 'file format pei-i386'
 
       - name: Checksums
-        run: sha256sum dist/df-x64.exe dist/df-x86.exe df.bat > SHA256SUMS.txt && cat SHA256SUMS.txt
+        run: |
+          {
+            ( cd dist && sha256sum df-x64.exe df-x86.exe )
+            sha256sum df.bat
+          } > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
