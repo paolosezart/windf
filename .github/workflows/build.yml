@@ -98,8 +98,10 @@ jobs:
             df.exe -i -r         overwrite an existing df
             ```
 
-            Nothing is extracted to a temp folder; the 64-bit code comes
-            straight out of a resource inside `df.exe`.
+            Nothing is extracted to a temp folder. The 64-bit code comes
+            straight out of a resource inside `df.exe`. Replacing a copy that
+            is already running works: the new image is swapped in by rename,
+            so there is no need to close `df` first.
 
             ```
             df             group by physical disk, show filesystem type
